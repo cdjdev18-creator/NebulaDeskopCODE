@@ -163,11 +163,10 @@ private:
         std::wstring primary = exeDir + L"\\log.txt";
         if (IsPathWritable(primary)) return primary;
 
-        wchar_t localAppData[MAX_PATH] = {};
-        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData))) {
-            std::wstring fallbackDir = std::wstring(localAppData) + L"\\NebulaDeskopCODE";
-            CreateDirectoryW(fallbackDir.c_str(), nullptr);
-            std::wstring fallback = fallbackDir + L"\\log.txt";
+        wchar_t tempPath[MAX_PATH] = {};
+        DWORD tempLen = GetTempPathW(MAX_PATH, tempPath);
+        if (tempLen > 0 && tempLen <= MAX_PATH) {
+            std::wstring fallback = std::wstring(tempPath) + L"NebulaDeskopCODE.log";
             if (IsPathWritable(fallback)) return fallback;
         }
         return L"";
@@ -294,10 +293,19 @@ static bool ForceTerminateProcess(DWORD pid) {
 }
 
 static bool CheckSingleInstance() {
-    // Primero intentar abrir un mutex existente (instancia previa)
-    HANDLE existingMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, SINGLE_INSTANCE_MUTEX);
-    if (existingMutex) {
-        CloseHandle(existingMutex);
+    g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
+    if (!g_singleInstanceMutex) {
+        LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
+        return true;
+    }
+
+    DWORD mutexLastError = GetLastError();
+
+    if (mutexLastError == ERROR_ALREADY_EXISTS) {
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = nullptr;
+        g_weOwnMutex = false;
+
         LOG_INFO("Se detecto una instancia anterior de NebulaDeskopCODE.");
 
         HWND prevWnd = FindPreviousInstanceWindow();
@@ -321,6 +329,7 @@ static bool CheckSingleInstance() {
                     if (ForceTerminateProcess(prevPid)) {
                         LOG_CRIT("Cierre forzado de la instancia anterior. Pueden perderse cambios no guardados.");
                         WaitForProcessEnd(prevPid, 3000);
+                        Sleep(500);
                     } else {
                         LOG_WINERR("ERROR", "No se pudo finalizar forzosamente la instancia anterior");
                         return false;
@@ -328,35 +337,40 @@ static bool CheckSingleInstance() {
                 }
             } else {
                 LOG_WARNING("Ventana encontrada pero no corresponde a NebulaDeskopCODE.");
+                g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
+                if (!g_singleInstanceMutex) {
+                    LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
+                    return true;
+                }
+                g_weOwnMutex = true;
+                LOG_INFO("No se encontraron instancias anteriores de NebulaDeskopCODE.");
                 return true;
             }
         } else {
             LOG_WARN("Mutex activo pero no se encontro ventana de la instancia anterior.");
+            g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
+            if (!g_singleInstanceMutex) {
+                LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
+                return true;
+            }
+            g_weOwnMutex = true;
+            LOG_INFO("No se encontraron instancias anteriores de NebulaDeskopCODE.");
+            return true;
         }
 
-        // Crear nuestro propio mutex tras cerrar la instancia previa
         g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
         if (!g_singleInstanceMutex) {
             LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
             return true;
         }
-        if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            LOG_ERROR("Otra instancia se activo mientras esperabamos.");
-            CloseHandle(g_singleInstanceMutex);
-            g_singleInstanceMutex = nullptr;
-            return false;
-        }
+        // Tras terminar la instancia previa, el mutex puede estar temporalmente
+        // abandonado; si CreateMutexW devuelve ERROR_ALREADY_EXISTS, seguimos
+        // porque el proceso dueño ya murio y el mutex es nuestro de hecho.
         g_weOwnMutex = true;
         LOG_INFO("Mutex de instancia unica obtenido tras cierre de instancia previa.");
         return true;
     }
 
-    // No existe mutex previo: somos la primera instancia
-    g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
-    if (!g_singleInstanceMutex) {
-        LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
-        return true;
-    }
     g_weOwnMutex = true;
     LOG_INFO("No se encontraron instancias anteriores de NebulaDeskopCODE.");
     return true;

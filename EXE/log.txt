@@ -1,0 +1,33 @@
+2026-11-21 23:09:41 [INFO] Sistema de log inicializado.
+2026-11-21 23:09:41 [INFO] No se encontraron instancias anteriores de NebulaDeskopCODE.
+2026-11-21 23:09:41 [INFO] NebulaDeskopCODE iniciando.
+2026-11-21 23:09:41 [INFO] Comprobando instancia unica.
+2026-11-21 23:09:41 [INFO] Inicializando interfaz.
+2026-11-21 23:09:41 [INFO] Clase de ventana principal registrada.
+2026-11-21 23:09:41 [WARNING] Archivo de configuracion no encontrado. Usando valores por defecto.
+2026-11-21 23:09:41 [INFO] Proyectos cargados.
+2026-11-21 23:09:42 [INFO] Entorno de WebView2 inicializado.
+2026-11-21 23:09:42 [INFO] Ventana principal creada.
+2026-11-21 23:09:42 [INFO] Controlador de WebView2 creado.
+2026-11-21 23:09:43 [INFO] Configuracion guardada.
+2026-11-21 23:09:43 [INFO] Configuracion guardada.
+2026-11-21 23:09:43 [INFO] Configuracion guardada.
+2026-11-21 23:09:43 [INFO] Configuracion guardada.
+2026-11-21 23:09:46 [INFO] Sistema de log inicializado.
+2026-11-21 23:09:46 [INFO] Se detecto una instancia anterior de NebulaDeskopCODE.
+2026-11-21 23:09:46 [INFO] Solicitando cierre controlado a la instancia anterior.
+2026-11-21 23:09:46 [WARNING] La instancia anterior no responde tras el cierre controlado.
+2026-11-21 23:09:46 [WARNING] Intentando cierre forzado de la instancia anterior.
+2026-11-21 23:09:46 [CRITICAL] Cierre forzado de la instancia anterior. Pueden perderse cambios no guardados.
+2026-11-21 23:09:46 [INFO] Mutex de instancia unica obtenido tras cierre de instancia previa.
+2026-11-21 23:09:46 [INFO] NebulaDeskopCODE iniciando.
+2026-11-21 23:09:46 [INFO] Comprobando instancia unica.
+2026-11-21 23:09:46 [INFO] Inicializando interfaz.
+2026-11-21 23:09:46 [INFO] Clase de ventana principal registrada.
+2026-11-21 23:09:46 [WARNING] Archivo de configuracion no encontrado. Usando valores por defecto.
+2026-11-21 23:09:46 [INFO] Proyectos cargados.
+2026-11-21 23:09:46 [INFO] Entorno de WebView2 inicializado.
+2026-11-21 23:09:46 [INFO] Ventana principal creada.
+2026-11-21 23:09:46 [INFO] Controlador de WebView2 creado.
+2026-11-21 23:09:47 [INFO] Configuracion guardada.
+2026-11-21 23:09:47 [INFO] Configuracion guardada.
