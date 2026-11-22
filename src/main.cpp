@@ -12,6 +12,11 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <psapi.h>
+#include <tlhelp32.h>
 #include "WebView2.h"
 
 static HINSTANCE g_hInstance = nullptr;
@@ -101,6 +106,282 @@ static std::wstring GetExeDir() {
     return std::wstring(path);
 }
 
+static bool fileExists(const std::wstring& path);
+
+// ============================================================================
+// SISTEMA DE LOG (UTF-8, rotacion, respaldo en LocalAppData, thread-safe)
+// ============================================================================
+
+class Logger {
+public:
+    static Logger& Instance() {
+        static Logger inst;
+        return inst;
+    }
+
+    void Log(const char* level, const char* message) {
+        EnterCriticalSection(&m_cs);
+        if (!m_ready) {
+            LeaveCriticalSection(&m_cs);
+            return;
+        }
+        std::string line = Timestamp() + " [" + std::string(level) + "] " + std::string(message) + "\n";
+        WriteLine(line);
+        LeaveCriticalSection(&m_cs);
+    }
+
+    void LogWinError(const char* level, const char* context) {
+        DWORD err = GetLastError();
+        std::ostringstream oss;
+        oss << context << " (codigo de error Windows: " << err << ")";
+        Log(level, oss.str().c_str());
+    }
+
+private:
+    Logger() : m_ready(false) {
+        InitializeCriticalSection(&m_cs);
+        m_logPath = ResolveLogPath();
+        if (!m_logPath.empty()) {
+            RotateIfNeeded();
+            m_ready = true;
+            Log("INFO", "Sistema de log inicializado.");
+        }
+    }
+
+    ~Logger() {
+        if (m_ready) {
+            Log("INFO", "Sistema de log cerrado.");
+        }
+        DeleteCriticalSection(&m_cs);
+    }
+
+    Logger(const Logger&) = delete;
+    Logger& operator=(const Logger&) = delete;
+
+    std::wstring ResolveLogPath() {
+        std::wstring exeDir = GetExeDir();
+        std::wstring primary = exeDir + L"\\log.txt";
+        if (IsPathWritable(primary)) return primary;
+
+        wchar_t localAppData[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData))) {
+            std::wstring fallbackDir = std::wstring(localAppData) + L"\\NebulaDeskopCODE";
+            CreateDirectoryW(fallbackDir.c_str(), nullptr);
+            std::wstring fallback = fallbackDir + L"\\log.txt";
+            if (IsPathWritable(fallback)) return fallback;
+        }
+        return L"";
+    }
+
+    bool IsPathWritable(const std::wstring& path) {
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        CloseHandle(h);
+        return true;
+    }
+
+    void RotateIfNeeded() {
+        if (m_logPath.empty()) return;
+        WIN32_FILE_ATTRIBUTE_DATA attr;
+        if (!GetFileAttributesExW(m_logPath.c_str(), GetFileExInfoStandard, &attr)) return;
+        ULARGE_INTEGER size;
+        size.LowPart = attr.nFileSizeLow;
+        size.HighPart = attr.nFileSizeHigh;
+        const ULONGLONG MAX_SIZE = 5ULL * 1024ULL * 1024ULL;
+        if (size.QuadPart < MAX_SIZE) return;
+
+        for (int i = 5; i >= 1; i--) {
+            std::wostringstream cur, nxt;
+            cur << m_logPath << L"." << i;
+            nxt << m_logPath << L"." << (i + 1);
+            if (i == 5) DeleteFileW(cur.str().c_str());
+            else {
+                if (fileExists(cur.str())) MoveFileW(cur.str().c_str(), nxt.str().c_str());
+            }
+        }
+        MoveFileW(m_logPath.c_str(), (m_logPath + L".1").c_str());
+    }
+
+    void WriteLine(const std::string& line) {
+        if (m_logPath.empty()) return;
+        HANDLE h = CreateFileW(m_logPath.c_str(), FILE_APPEND_DATA,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+        DWORD written = 0;
+        WriteFile(h, line.c_str(), (DWORD)line.size(), &written, nullptr);
+        CloseHandle(h);
+    }
+
+    std::string Timestamp() {
+        auto now = std::chrono::system_clock::now();
+        auto timeT = std::chrono::system_clock::to_time_t(now);
+        std::tm* tm = std::localtime(&timeT);
+        std::ostringstream oss;
+        oss << std::put_time(tm, "%Y-%m-%d %H:%M:%S");
+        return oss.str();
+    }
+
+    std::wstring m_logPath;
+    CRITICAL_SECTION m_cs;
+    bool m_ready;
+};
+
+#define LOG_INFO(msg)  Logger::Instance().Log("INFO", msg)
+#define LOG_WARN(msg)  Logger::Instance().Log("WARNING", msg)
+#define LOG_WARNING(msg) Logger::Instance().Log("WARNING", msg)
+#define LOG_ERROR(msg) Logger::Instance().Log("ERROR", msg)
+#define LOG_CRIT(msg)  Logger::Instance().Log("CRITICAL", msg)
+#define LOG_WINERR(level, ctx) Logger::Instance().LogWinError(level, ctx)
+
+// ============================================================================
+// SISTEMA DE INSTANCIA UNICA
+// ============================================================================
+
+static const wchar_t SINGLE_INSTANCE_MUTEX[] = L"Global\\NebulaDeskopCODE_SingleInstanceMutex_v1";
+static HANDLE g_singleInstanceMutex = nullptr;
+static bool g_weOwnMutex = false;
+static DWORD g_previousPid = 0;
+
+static std::wstring GetProcessExePath(DWORD pid) {
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return L"";
+    wchar_t path[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    if (!QueryFullProcessImageNameW(hProc, 0, path, &size)) {
+        CloseHandle(hProc);
+        return L"";
+    }
+    CloseHandle(hProc);
+    return std::wstring(path);
+}
+
+static HWND FindPreviousInstanceWindow() {
+    return FindWindowW(L"NebulaDeskopCODE", nullptr);
+}
+
+static bool IsSameExecutable(DWORD pid) {
+    std::wstring otherPath = GetProcessExePath(pid);
+    if (otherPath.empty()) return false;
+    std::wstring ourPath;
+    {
+        wchar_t buf[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, buf, MAX_PATH);
+        ourPath = std::wstring(buf);
+    }
+    return _wcsicmp(otherPath.c_str(), ourPath.c_str()) == 0;
+}
+
+#ifndef PROCESS_SYNCHRONIZE
+#define PROCESS_SYNCHRONIZE 0x00020000
+#endif
+
+static bool WaitForProcessEnd(DWORD pid, DWORD timeoutMs) {
+    HANDLE hProc = OpenProcess(PROCESS_SYNCHRONIZE, FALSE, pid);
+    if (!hProc) return true;
+    DWORD result = WaitForSingleObject(hProc, timeoutMs);
+    CloseHandle(hProc);
+    return result == WAIT_OBJECT_0;
+}
+
+static bool ForceTerminateProcess(DWORD pid) {
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!hProc) return false;
+    BOOL result = TerminateProcess(hProc, 1);
+    CloseHandle(hProc);
+    return result != FALSE;
+}
+
+static bool CheckSingleInstance() {
+    // Primero intentar abrir un mutex existente (instancia previa)
+    HANDLE existingMutex = OpenMutexW(MUTEX_ALL_ACCESS, FALSE, SINGLE_INSTANCE_MUTEX);
+    if (existingMutex) {
+        CloseHandle(existingMutex);
+        LOG_INFO("Se detecto una instancia anterior de NebulaDeskopCODE.");
+
+        HWND prevWnd = FindPreviousInstanceWindow();
+        if (prevWnd) {
+            DWORD prevPid = 0;
+            GetWindowThreadProcessId(prevWnd, &prevPid);
+            if (prevPid != 0 && IsSameExecutable(prevPid)) {
+                g_previousPid = prevPid;
+                LOG_INFO("Solicitando cierre controlado a la instancia anterior.");
+
+                if (!PostMessageW(prevWnd, WM_CLOSE, 0, 0)) {
+                    LOG_WINERR("WARNING", "No se pudo enviar WM_CLOSE a la instancia anterior");
+                }
+
+                const DWORD GRACEFUL_WAIT_MS = 5000;
+                if (WaitForProcessEnd(prevPid, GRACEFUL_WAIT_MS)) {
+                    LOG_INFO("La instancia anterior cerro correctamente.");
+                } else {
+                    LOG_WARN("La instancia anterior no responde tras el cierre controlado.");
+                    LOG_WARN("Intentando cierre forzado de la instancia anterior.");
+                    if (ForceTerminateProcess(prevPid)) {
+                        LOG_CRIT("Cierre forzado de la instancia anterior. Pueden perderse cambios no guardados.");
+                        WaitForProcessEnd(prevPid, 3000);
+                    } else {
+                        LOG_WINERR("ERROR", "No se pudo finalizar forzosamente la instancia anterior");
+                        return false;
+                    }
+                }
+            } else {
+                LOG_WARNING("Ventana encontrada pero no corresponde a NebulaDeskopCODE.");
+                return true;
+            }
+        } else {
+            LOG_WARN("Mutex activo pero no se encontro ventana de la instancia anterior.");
+        }
+
+        // Crear nuestro propio mutex tras cerrar la instancia previa
+        g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
+        if (!g_singleInstanceMutex) {
+            LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
+            return true;
+        }
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            LOG_ERROR("Otra instancia se activo mientras esperabamos.");
+            CloseHandle(g_singleInstanceMutex);
+            g_singleInstanceMutex = nullptr;
+            return false;
+        }
+        g_weOwnMutex = true;
+        LOG_INFO("Mutex de instancia unica obtenido tras cierre de instancia previa.");
+        return true;
+    }
+
+    // No existe mutex previo: somos la primera instancia
+    g_singleInstanceMutex = CreateMutexW(nullptr, FALSE, SINGLE_INSTANCE_MUTEX);
+    if (!g_singleInstanceMutex) {
+        LOG_WINERR("ERROR", "No se pudo crear el mutex de instancia unica");
+        return true;
+    }
+    g_weOwnMutex = true;
+    LOG_INFO("No se encontraron instancias anteriores de NebulaDeskopCODE.");
+    return true;
+}
+
+static void ReleaseSingleInstance() {
+    if (g_singleInstanceMutex) {
+        CloseHandle(g_singleInstanceMutex);
+        g_singleInstanceMutex = nullptr;
+    }
+    g_weOwnMutex = false;
+}
+
+// ============================================================================
+// FILTRO DE EXCEPCIONES NO CONTROLADAS
+// ============================================================================
+
+static LONG WINAPI NebulaUnhandledExceptionFilter(EXCEPTION_POINTERS* pExceptionInfo) {
+    std::ostringstream oss;
+    oss << "Excepcion no controlada (codigo: 0x" << std::hex
+        << pExceptionInfo->ExceptionRecord->ExceptionCode << ")";
+    LOG_CRIT(oss.str().c_str());
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 static std::wstring Utf8ToWide(const std::string& str) {
     if (str.empty()) return L"";
     int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
@@ -163,6 +444,7 @@ static void SaveConfig() {
     std::wofstream ofs(path.c_str(), std::ios::binary | std::ios::trunc);
     if (ofs) {
         ofs << obf;
+        LOG_INFO("Configuracion guardada.");
     }
 }
 
@@ -787,12 +1069,16 @@ static LRESULT CALLBACK WindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             BuildObfuscateMap();
             if (!LoadConfig()) {
+                LOG_WARNING("Archivo de configuracion no encontrado. Usando valores por defecto.");
                 g_panelLeft = 280; g_panelRight = 350;
                 g_panelCenter = 600; g_panelCenterTop = 400;
                 g_panelCenterBottom = 160; g_yamaVisible = true;
                 g_windowMode = 1; g_customWidth = 1200; g_customHeight = 800;
+            } else {
+                LOG_INFO("Configuracion cargada.");
             }
             LoadProjects();
+            LOG_INFO("Proyectos cargados.");
 
             if (g_windowMode == 2) {
                 ShowWindow(hwnd, SW_MAXIMIZE);
@@ -813,13 +1099,17 @@ static LRESULT CALLBACK WindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
                 nullptr, nullptr, nullptr, envHandler);
             if (FAILED(hr)) {
+                LOG_WINERR("ERROR", "No se pudo crear el entorno de WebView2");
                 OutputDebugStringW(L"Failed to create WebView2 environment\n");
+            } else {
+                LOG_INFO("Entorno de WebView2 inicializado.");
             }
             return 0;
         }
         case WM_APP + 1: {
             ControllerHandlerMain* ctrlHandler = new ControllerHandlerMain(hwnd);
             g_webviewEnv->CreateCoreWebView2Controller(hwnd, ctrlHandler);
+            LOG_INFO("Controlador de WebView2 creado.");
             return 0;
         }
         case WM_APP + 2: {
@@ -866,6 +1156,7 @@ static LRESULT CALLBACK WindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         case WM_DESTROY:
             SaveConfig();
             SaveProjects();
+            LOG_INFO("Configuracion y proyectos guardados.");
             if (g_mainController) {
                 g_mainController->put_IsVisible(FALSE);
                 g_mainController->Release();
@@ -880,6 +1171,7 @@ static LRESULT CALLBACK WindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 g_webviewEnv = nullptr;
             }
             CoUninitialize();
+            LOG_INFO("Ventana principal cerrada.");
             PostQuitMessage(0);
             return 0;
         default:
@@ -895,11 +1187,13 @@ static LRESULT CALLBACK WindowProcSecondary(HWND hwnd, UINT uMsg, WPARAM wParam,
             InitCommonControls();
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             BuildObfuscateMap();
+            LOG_INFO("Ventana secundaria creada.");
 
             EnvironmentHandler* envHandler = new EnvironmentHandler(hwnd);
             HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
                 nullptr, nullptr, nullptr, envHandler);
             if (FAILED(hr)) {
+                LOG_WINERR("ERROR", "No se pudo crear el entorno de WebView2 (secundario)");
                 OutputDebugStringW(L"Failed to create WebView2 environment (secondary)\n");
             }
             return 0;
@@ -918,6 +1212,7 @@ static LRESULT CALLBACK WindowProcSecondary(HWND hwnd, UINT uMsg, WPARAM wParam,
         case WM_SIZE:
             return 0;
         case WM_DESTROY:
+            LOG_INFO("Ventana secundaria cerrada.");
             PostQuitMessage(0);
             return 0;
         default:
@@ -950,18 +1245,31 @@ static void createSecondaryWindow(const wchar_t* className, const wchar_t* title
 }
 
 static void openSettingsWindow() {
+    LOG_INFO("Abriendo ventana de configuracion.");
     createSecondaryWindow(L"NebulaSettingsClass", L"Nebula Settings",
                           L"file:///" + GetExeDir() + L"\\ui\\settings.html",
                           500, 450);
 }
 
 static void openAgentManagerWindow() {
+    LOG_INFO("Abriendo administrador de agentes.");
     createSecondaryWindow(L"NebulaAgentManagerClass", L"Nebula Agent Manager",
                           L"file:///" + GetExeDir() + L"\\ui\\agentmanager.html",
                           700, 500);
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    SetUnhandledExceptionFilter(NebulaUnhandledExceptionFilter);
+
+    if (!CheckSingleInstance()) {
+        LOG_ERROR("No se pudo obtener el mutex de instancia unica. Saliendo.");
+        return 1;
+    }
+
+    LOG_INFO("NebulaDeskopCODE iniciando.");
+    LOG_INFO("Comprobando instancia unica.");
+    LOG_INFO("Inicializando interfaz.");
+
     const wchar_t CLASS_NAME[] = L"NebulaDeskopCODE";
 
     WNDCLASSW wc = {};
@@ -971,7 +1279,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(RGB(20, 20, 20));
 
-    RegisterClassW(&wc);
+    if (!RegisterClassW(&wc)) {
+        LOG_WINERR("CRITICAL", "No se pudo registrar la clase de ventana principal");
+        ReleaseSingleInstance();
+        return 1;
+    }
+    LOG_INFO("Clase de ventana principal registrada.");
 
     HWND hwnd = CreateWindowExW(
         0,
@@ -983,9 +1296,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     );
 
     if (hwnd == nullptr) {
-        return 0;
+        LOG_WINERR("CRITICAL", "No se pudo crear la ventana principal");
+        ReleaseSingleInstance();
+        return 1;
     }
 
+    LOG_INFO("Ventana principal creada.");
     ShowWindow(hwnd, SW_MAXIMIZE);
     UpdateWindow(hwnd);
 
@@ -994,6 +1310,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+
+    LOG_INFO("Aplicacion cerrada correctamente.");
+    ReleaseSingleInstance();
 
     DeleteObject(wc.hbrBackground);
     return 0;
