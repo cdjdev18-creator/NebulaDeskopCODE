@@ -1,21 +1,25 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <shlobj.h>
+#include <shlwapi.h>
+#include <wincrypt.h>
+#include <combaseapi.h>
+#include <objbase.h>
 #include <cwchar>
 #include <string>
 #include <vector>
+#include <map>
 #include <fstream>
 #include <sstream>
-#include <shlwapi.h>
-#include <combaseapi.h>
-#include <objbase.h>
+#include <algorithm>
 #include "WebView2.h"
 
 static HINSTANCE g_hInstance = nullptr;
-static HWND g_hwnd = nullptr;
+static HWND g_hwndMain = nullptr;
 
 static ICoreWebView2Environment* g_webviewEnv = nullptr;
-static ICoreWebView2Controller* g_webviewController = nullptr;
-static ICoreWebView2* g_webview = nullptr;
+static ICoreWebView2Controller* g_mainController = nullptr;
+static ICoreWebView2* g_mainWebview = nullptr;
 
 static int g_panelLeft = 280;
 static int g_panelRight = 350;
@@ -24,7 +28,18 @@ static int g_panelCenterTop = 400;
 static int g_panelCenterBottom = 160;
 static bool g_yamaVisible = true;
 
+static int g_windowMode = 1;
+static int g_customWidth = 1200;
+static int g_customHeight = 800;
+
+static std::vector<std::wstring> g_projects;
+static std::wstring g_currentProject;
+
 static const wchar_t CONFIG_FILE[] = L"confis\\confiUI.txt";
+static const wchar_t PROJECTS_FILE[] = L"confis\\projects.txt";
+static const wchar_t AGENTS_DIR[] = L"confis\\agents";
+
+static std::map<HWND, std::wstring> g_secondaryUrls;
 
 static const wchar_t OBFUSCATE_SET[] =
     L"\u0410\u0411\u0412\u0413\u0414\u0415\u0416\u0417\u0418\u0419\u041a\u041b\u041c\u041d\u041e\u041f\u0420\u0421\u0422\u0423\u0424\u0425\u0426\u0427\u0428\u0429"
@@ -86,6 +101,22 @@ static std::wstring GetExeDir() {
     return std::wstring(path);
 }
 
+static std::wstring Utf8ToWide(const std::string& str) {
+    if (str.empty()) return L"";
+    int size = MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0);
+    std::wstring result(size, 0);
+    MultiByteToWideChar(CP_UTF8, 0, str.c_str(), (int)str.size(), &result[0], size);
+    return result;
+}
+
+static std::string WideToUtf8(const std::wstring& str) {
+    if (str.empty()) return "";
+    int size = WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), nullptr, 0, nullptr, nullptr);
+    std::string result(size, 0);
+    WideCharToMultiByte(CP_UTF8, 0, str.c_str(), (int)str.size(), &result[0], size, nullptr, nullptr);
+    return result;
+}
+
 static std::string SerializeConfig() {
     std::ostringstream oss;
     oss << "leftW=" << g_panelLeft << ";"
@@ -93,7 +124,10 @@ static std::string SerializeConfig() {
         << "termH=" << g_panelCenterBottom << ";"
         << "mainW=" << g_panelCenter << ";"
         << "yamaVisible=" << (g_yamaVisible ? 1 : 0) << ";"
-        << "centerTop=" << g_panelCenterTop << ";";
+        << "centerTop=" << g_panelCenterTop << ";"
+        << "windowMode=" << g_windowMode << ";"
+        << "customW=" << g_customWidth << ";"
+        << "customH=" << g_customHeight << ";";
     return oss.str();
 }
 
@@ -111,6 +145,9 @@ static void DeserializeConfig(const std::string& data) {
         else if (key == "mainW") g_panelCenter = std::stoi(val);
         else if (key == "yamaVisible") g_yamaVisible = (std::stoi(val) != 0);
         else if (key == "centerTop") g_panelCenterTop = std::stoi(val);
+        else if (key == "windowMode") g_windowMode = std::stoi(val);
+        else if (key == "customW") g_customWidth = std::stoi(val);
+        else if (key == "customH") g_customHeight = std::stoi(val);
     }
 }
 
@@ -148,11 +185,302 @@ static bool LoadConfig() {
     return true;
 }
 
-static std::wstring GetUiFileUrl() {
-    std::wstring dir = GetExeDir();
-    std::wstring path = dir + L"\\ui\\index.html";
-    return L"file:///" + path;
+static void SaveProjects() {
+    std::wstring exeDir = GetExeDir();
+    std::wstring dir = exeDir + L"\\confis";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring path = exeDir + L"\\" + PROJECTS_FILE;
+
+    std::wofstream ofs(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!ofs) return;
+
+    for (size_t i = 0; i < g_projects.size(); i++) {
+        ofs << g_projects[i] << L"\n";
+    }
 }
+
+static bool LoadProjects() {
+    std::wstring exeDir = GetExeDir();
+    std::wstring path = exeDir + L"\\" + PROJECTS_FILE;
+
+    std::wifstream ifs(path.c_str(), std::ios::binary);
+    if (!ifs) return false;
+
+    g_projects.clear();
+    std::wstring line;
+    while (std::getline(ifs, line)) {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (!line.empty()) g_projects.push_back(line);
+    }
+    return true;
+}
+
+static std::string readFileUtf8(const std::wstring& path) {
+    std::ifstream ifs(path.c_str(), std::ios::binary);
+    if (!ifs) return std::string();
+    std::ostringstream oss;
+    oss << ifs.rdbuf();
+    return oss.str();
+}
+
+static bool writeFileUtf8(const std::wstring& path, const std::string& content) {
+    std::ofstream ofs(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!ofs) return false;
+    ofs.write(content.c_str(), (std::streamsize)content.size());
+    return ofs.good();
+}
+
+static bool directoryExists(const std::wstring& path) {
+    DWORD dwAttr = GetFileAttributesW(path.c_str());
+    return (dwAttr != INVALID_FILE_ATTRIBUTES && (dwAttr & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static bool fileExists(const std::wstring& path) {
+    DWORD dwAttr = GetFileAttributesW(path.c_str());
+    return (dwAttr != INVALID_FILE_ATTRIBUTES && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static void enumerateDirectory(HWND hwnd, ICoreWebView2* webview, const std::wstring& path) {
+    std::wstring searchPath = path;
+    if (searchPath.back() != L'\\') searchPath += L"\\*";
+
+    WIN32_FIND_DATAW ffd;
+    HANDLE hFind = FindFirstFileW(searchPath.c_str(), &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        if (webview) {
+            std::wstring msg = L"EVENT:DIR_LIST|" + path + L"|[]";
+            webview->PostWebMessageAsString(msg.c_str());
+        }
+        return;
+    }
+
+    std::vector<std::pair<bool, std::wstring>> items;
+    do {
+        if (wcscmp(ffd.cFileName, L".") == 0 || wcscmp(ffd.cFileName, L"..") == 0) continue;
+        bool isDir = (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        items.push_back({isDir, ffd.cFileName});
+    } while (FindNextFileW(hFind, &ffd) != 0);
+    FindClose(hFind);
+
+    std::sort(items.begin(), items.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first;
+        return a.second < b.second;
+    });
+
+    std::wstring json = L"[";
+    for (size_t i = 0; i < items.size(); i++) {
+        std::wstring name = items[i].second;
+        std::replace(name.begin(), name.end(), L'"', L'\\');
+        json += L"{\"name\":\"" + name + L"\",\"type\":\"" + (items[i].first ? L"dir" : L"file") + L"\"}";
+        if (i + 1 < items.size()) json += L",";
+    }
+    json += L"]";
+
+    if (webview) {
+        std::wstring msg = L"EVENT:DIR_LIST|" + path + L"|" + json;
+        webview->PostWebMessageAsString(msg.c_str());
+    }
+}
+
+static void pickFolder(HWND hwnd, ICoreWebView2* webview) {
+    BROWSEINFOW bi = {};
+    bi.hwndOwner = hwnd;
+    bi.lpszTitle = L"Seleccionar carpeta de proyecto";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (pidl != nullptr) {
+        wchar_t path[MAX_PATH] = {};
+        if (SHGetPathFromIDListW(pidl, path)) {
+            if (webview) {
+                std::wstring msg = L"EVENT:FOLDER_PICKED|" + std::wstring(path);
+                webview->PostWebMessageAsString(msg.c_str());
+            }
+        }
+        IMalloc* pMalloc = nullptr;
+        if (SUCCEEDED(SHGetMalloc(&pMalloc))) {
+            pMalloc->Free(pidl);
+            pMalloc->Release();
+        }
+    } else {
+        if (webview) {
+            webview->PostWebMessageAsString(L"EVENT:FOLDER_CANCELLED");
+        }
+    }
+}
+
+static void addProject(const std::wstring& path, ICoreWebView2* webview) {
+    for (size_t i = 0; i < g_projects.size(); i++) {
+        if (g_projects[i] == path) return;
+    }
+    g_projects.push_back(path);
+    SaveProjects();
+
+    if (webview) {
+        std::wstring json = L"[";
+        for (size_t i = 0; i < g_projects.size(); i++) {
+            std::wstring name = g_projects[i];
+            size_t lastSlash = name.find_last_of(L"\\/");
+            if (lastSlash != std::wstring::npos) name = name.substr(lastSlash + 1);
+            std::replace(name.begin(), name.end(), L'"', L'\\');
+            json += L"{\"path\":\"" + g_projects[i] + L"\",\"name\":\"" + name + L"\"}";
+            if (i + 1 < g_projects.size()) json += L",";
+        }
+        json += L"]";
+        std::wstring msg = L"EVENT:PROJECTS_LIST|" + json;
+        webview->PostWebMessageAsString(msg.c_str());
+    }
+}
+
+static void removeProject(const std::wstring& path, ICoreWebView2* webview) {
+    g_projects.erase(std::remove(g_projects.begin(), g_projects.end(), path), g_projects.end());
+    SaveProjects();
+
+    if (g_currentProject == path) {
+        g_currentProject.clear();
+    }
+
+    if (webview) {
+        std::wstring json = L"[";
+        for (size_t i = 0; i < g_projects.size(); i++) {
+            std::wstring name = g_projects[i];
+            size_t lastSlash = name.find_last_of(L"\\/");
+            if (lastSlash != std::wstring::npos) name = name.substr(lastSlash + 1);
+            std::replace(name.begin(), name.end(), L'"', L'\\');
+            json += L"{\"path\":\"" + g_projects[i] + L"\",\"name\":\"" + name + L"\"}";
+            if (i + 1 < g_projects.size()) json += L",";
+        }
+        json += L"]";
+        std::wstring msg = L"EVENT:PROJECTS_LIST|" + json;
+        webview->PostWebMessageAsString(msg.c_str());
+    }
+}
+
+static void setWindowMode(int mode, int w, int h) {
+    g_windowMode = mode;
+    if (w > 0) g_customWidth = w;
+    if (h > 0) g_customHeight = h;
+
+    if (g_hwndMain) {
+        switch (mode) {
+            case 0:
+                ShowWindow(g_hwndMain, SW_RESTORE);
+                break;
+            case 1:
+                ShowWindow(g_hwndMain, SW_MAXIMIZE);
+                break;
+            case 2:
+                ShowWindow(g_hwndMain, SW_MAXIMIZE);
+                SetWindowLongW(g_hwndMain, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                SetWindowPos(g_hwndMain, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN),
+                             GetSystemMetrics(SM_CYSCREEN), SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                break;
+            case 3:
+                ShowWindow(g_hwndMain, SW_RESTORE);
+                SetWindowPos(g_hwndMain, HWND_TOP, 0, 0, g_customWidth, g_customHeight,
+                             SWP_NOMOVE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                break;
+        }
+    }
+    SaveConfig();
+}
+
+static void listAgents(ICoreWebView2* webview) {
+    std::wstring exeDir = GetExeDir();
+    std::wstring agentsPath = exeDir + L"\\" + AGENTS_DIR;
+
+    std::wstring json = L"[";
+    bool first = true;
+
+    if (directoryExists(agentsPath)) {
+        std::wstring searchPath = agentsPath + L"\\*";
+        WIN32_FIND_DATAW ffd;
+        HANDLE hFind = FindFirstFileW(searchPath.c_str(), &ffd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                if (wcscmp(ffd.cFileName, L".") == 0 || wcscmp(ffd.cFileName, L"..") == 0) continue;
+                if ((ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) continue;
+
+                std::wstring agentDir = agentsPath + L"\\" + ffd.cFileName;
+                std::wstring agentJsonPath = agentDir + L"\\agent.json";
+
+                std::string agentName = WideToUtf8(ffd.cFileName);
+                std::string agentDesc = "";
+                std::string agentVersion = "1.0.0";
+                std::string agentAuthor = "Desconocido";
+                std::string agentLicense = "";
+
+                if (fileExists(agentJsonPath)) {
+                    std::string content = readFileUtf8(agentJsonPath);
+                    auto extractField = [&](const std::string& key, std::string& out) {
+                        size_t pos = content.find("\"" + key + "\"");
+                        if (pos != std::string::npos) {
+                            size_t colon = content.find(":", pos);
+                            if (colon != std::string::npos) {
+                                size_t q1 = content.find("\"", colon + 1);
+                                size_t q2 = content.find("\"", q1 + 1);
+                                if (q1 != std::string::npos && q2 != std::string::npos) {
+                                    out = content.substr(q1 + 1, q2 - q1 - 1);
+                                }
+                            }
+                        }
+                    };
+                    extractField("nombre", agentName);
+                    if (agentName.empty()) agentName = WideToUtf8(ffd.cFileName);
+                    extractField("descripcion", agentDesc);
+                    extractField("version", agentVersion);
+                    extractField("autor", agentAuthor);
+                    extractField("proveedor", agentAuthor);
+                    extractField("licencia", agentLicense);
+                }
+
+                if (!first) json += L",";
+                first = false;
+
+                std::wstring wName = Utf8ToWide(agentName);
+                std::wstring wDesc = Utf8ToWide(agentDesc);
+                std::wstring wVersion = Utf8ToWide(agentVersion);
+                std::wstring wAuthor = Utf8ToWide(agentAuthor);
+                std::wstring wLicense = Utf8ToWide(agentLicense);
+                std::replace(wName.begin(), wName.end(), L'"', L'\\');
+                std::replace(wDesc.begin(), wDesc.end(), L'"', L'\\');
+                std::replace(wVersion.begin(), wVersion.end(), L'"', L'\\');
+                std::replace(wAuthor.begin(), wAuthor.end(), L'"', L'\\');
+                std::replace(wLicense.begin(), wLicense.end(), L'"', L'\\');
+
+                json += L"{\"name\":\"" + wName + L"\",\"description\":\"" + wDesc +
+                        L"\",\"version\":\"" + wVersion + L"\",\"author\":\"" + wAuthor +
+                        L"\",\"license\":\"" + wLicense + L"\",\"installed\":true}";
+            } while (FindNextFileW(hFind, &ffd) != 0);
+            FindClose(hFind);
+        }
+    }
+    json += L"]";
+
+    if (webview) {
+        std::wstring msg = L"EVENT:AGENT_LIST|" + json;
+        webview->PostWebMessageAsString(msg.c_str());
+    }
+}
+
+static void uninstallAgent(const std::wstring& name, ICoreWebView2* webview) {
+    std::wstring exeDir = GetExeDir();
+    std::wstring agentPath = exeDir + L"\\" + AGENTS_DIR + L"\\" + name;
+
+    if (directoryExists(agentPath)) {
+        std::wstring jsonPath = agentPath + L"\\agent.json";
+        DeleteFileW(jsonPath.c_str());
+        RemoveDirectoryW(agentPath.c_str());
+    }
+
+    if (webview) {
+        listAgents(webview);
+    }
+}
+
+static void handleWebMessage(HWND hwnd, ICoreWebView2* webview, const std::wstring& msg);
+static void openSettingsWindow();
+static void openAgentManagerWindow();
 
 class WebMessageHandler;
 
@@ -189,7 +517,8 @@ private:
 
 class WebMessageHandler : public ICoreWebView2WebMessageReceivedEventHandler {
 public:
-    explicit WebMessageHandler(HWND hwnd) : m_hwnd(hwnd), m_refCount(1) {}
+    WebMessageHandler(HWND hwnd, ICoreWebView2* webview)
+        : m_hwnd(hwnd), m_webview(webview), m_refCount(1) {}
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) {
         if (!ppvObject) return E_POINTER;
@@ -209,29 +538,26 @@ public:
         if (SUCCEEDED(args->TryGetWebMessageAsString(&message))) {
             std::wstring msg(message);
             CoTaskMemFree(message);
-
-            if (msg.find(L"SAVE_CONFIG") == 0) {
-                SaveConfig();
-                PostMessageW(m_hwnd, WM_APP + 3, 0, 0);
-            }
+            handleWebMessage(m_hwnd, m_webview, msg);
         }
         return S_OK;
     }
 
     void SendMessage(const std::wstring& message) {
-        if (g_webview) {
-            g_webview->PostWebMessageAsString(message.c_str());
+        if (m_webview) {
+            m_webview->PostWebMessageAsString(message.c_str());
         }
     }
 
 private:
     HWND m_hwnd;
+    ICoreWebView2* m_webview;
     LONG m_refCount;
 };
 
-class ControllerHandler : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+class ControllerHandlerMain : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
 public:
-    explicit ControllerHandler(HWND hwnd) : m_hwnd(hwnd), m_refCount(1) {}
+    explicit ControllerHandlerMain(HWND hwnd) : m_hwnd(hwnd), m_refCount(1) {}
 
     STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) {
         if (!ppvObject) return E_POINTER;
@@ -248,21 +574,21 @@ public:
 
     STDMETHODIMP Invoke(HRESULT result, ICoreWebView2Controller* controller) {
         if (SUCCEEDED(result) && controller) {
-            g_webviewController = controller;
+            g_mainController = controller;
             controller->AddRef();
-            controller->get_CoreWebView2(&g_webview);
+            controller->get_CoreWebView2(&g_mainWebview);
 
-            WebMessageHandler* msgHandler = new WebMessageHandler(m_hwnd);
+            WebMessageHandler* msgHandler = new WebMessageHandler(m_hwnd, g_mainWebview);
             EventRegistrationToken token;
-            g_webview->add_WebMessageReceived(msgHandler, &token);
+            g_mainWebview->add_WebMessageReceived(msgHandler, &token);
 
-            g_webviewController->put_IsVisible(TRUE);
+            controller->put_IsVisible(TRUE);
             RECT rc;
             GetClientRect(m_hwnd, &rc);
-            g_webviewController->put_Bounds(rc);
+            controller->put_Bounds(rc);
 
-            std::wstring url = GetUiFileUrl();
-            g_webview->Navigate(url.c_str());
+            std::wstring url = L"file:///" + GetExeDir() + L"\\ui\\index.html";
+            g_mainWebview->Navigate(url.c_str());
 
             PostMessageW(m_hwnd, WM_APP + 2, 0, 0);
         }
@@ -274,12 +600,186 @@ private:
     LONG m_refCount;
 };
 
-static WebMessageHandler* g_msgHandler = nullptr;
+class ControllerHandlerSecondary : public ICoreWebView2CreateCoreWebView2ControllerCompletedHandler {
+public:
+    ControllerHandlerSecondary(HWND hwnd, const std::wstring& url)
+        : m_hwnd(hwnd), m_url(url), m_refCount(1) {}
 
-static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) {
+        if (!ppvObject) return E_POINTER;
+        *ppvObject = this;
+        AddRef();
+        return S_OK;
+    }
+    STDMETHODIMP_(ULONG) AddRef() { return InterlockedIncrement(&m_refCount); }
+    STDMETHODIMP_(ULONG) Release() {
+        ULONG ref = InterlockedDecrement(&m_refCount);
+        if (ref == 0) delete this;
+        return ref;
+    }
+
+    STDMETHODIMP Invoke(HRESULT result, ICoreWebView2Controller* controller) {
+        if (SUCCEEDED(result) && controller) {
+            controller->AddRef();
+            ICoreWebView2* webview = nullptr;
+            controller->get_CoreWebView2(&webview);
+
+            WebMessageHandler* msgHandler = new WebMessageHandler(m_hwnd, webview);
+            EventRegistrationToken token;
+            webview->add_WebMessageReceived(msgHandler, &token);
+
+            controller->put_IsVisible(TRUE);
+            RECT rc;
+            GetClientRect(m_hwnd, &rc);
+            controller->put_Bounds(rc);
+
+            webview->Navigate(m_url.c_str());
+
+            webview->Release();
+            controller->Release();
+        }
+        return S_OK;
+    }
+
+private:
+    HWND m_hwnd;
+    std::wstring m_url;
+    LONG m_refCount;
+};
+
+static void handleWebMessage(HWND hwnd, ICoreWebView2* webview, const std::wstring& msg) {
+    if (msg.find(L"SAVE_CONFIG") == 0) {
+        SaveConfig();
+        return;
+    }
+    if (msg.find(L"READ_DIR") == 0) {
+        std::wstring path = msg.substr(8);
+        enumerateDirectory(hwnd, webview, path);
+        return;
+    }
+    if (msg.find(L"READ_FILE") == 0) {
+        std::wstring path = msg.substr(9);
+        std::string content = readFileUtf8(path);
+        DWORD encodeLen = 0;
+        CryptBinaryToStringA((const BYTE*)content.data(), (DWORD)content.size(),
+                             CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, nullptr, &encodeLen);
+        std::string b64(encodeLen > 0 ? encodeLen - 1 : 0, 0);
+        if (encodeLen > 0) {
+            CryptBinaryToStringA((const BYTE*)content.data(), (DWORD)content.size(),
+                                 CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, &b64[0], &encodeLen);
+            b64.resize(encodeLen - 1);
+        }
+        if (webview) {
+            std::wstring wideEncoded = Utf8ToWide(b64);
+            std::wstring wmsg = L"EVENT:FILE_CONTENT|" + path + L"|" + wideEncoded;
+            webview->PostWebMessageAsString(wmsg.c_str());
+        }
+        return;
+    }
+    if (msg.find(L"WRITE_FILE") == 0) {
+        size_t sep = msg.find(L'|', 10);
+        if (sep != std::wstring::npos) {
+            std::wstring path = msg.substr(10, sep - 10);
+            std::wstring encodedW = msg.substr(sep + 1);
+            std::string encoded = WideToUtf8(encodedW);
+            DWORD outLen = 0;
+            CryptStringToBinaryA(encoded.c_str(), (DWORD)encoded.size(), CRYPT_STRING_BASE64,
+                                 nullptr, &outLen, nullptr, nullptr);
+            std::string decoded(outLen, 0);
+            CryptStringToBinaryA(encoded.c_str(), (DWORD)encoded.size(), CRYPT_STRING_BASE64,
+                                 (BYTE*)decoded.data(), &outLen, nullptr, nullptr);
+            decoded.resize(outLen);
+            if (writeFileUtf8(path, decoded)) {
+                if (webview) {
+                    webview->PostWebMessageAsString((L"EVENT:FILE_SAVED|" + path).c_str());
+                }
+            } else {
+                if (webview) {
+                    webview->PostWebMessageAsString((L"EVENT:FILE_ERROR|" + path + L"|write_failed").c_str());
+                }
+            }
+        }
+        return;
+    }
+    if (msg == L"PICK_FOLDER") {
+        pickFolder(hwnd, webview);
+        return;
+    }
+    if (msg.find(L"ADD_PROJECT") == 0) {
+        std::wstring path = msg.substr(10);
+        addProject(path, webview);
+        return;
+    }
+    if (msg.find(L"REMOVE_PROJECT") == 0) {
+        std::wstring path = msg.substr(14);
+        removeProject(path, webview);
+        return;
+    }
+    if (msg == L"LIST_PROJECTS") {
+        if (webview) {
+            std::wstring json = L"[";
+            for (size_t i = 0; i < g_projects.size(); i++) {
+                std::wstring name = g_projects[i];
+                size_t lastSlash = name.find_last_of(L"\\/");
+                if (lastSlash != std::wstring::npos) name = name.substr(lastSlash + 1);
+                std::replace(name.begin(), name.end(), L'"', L'\\');
+                json += L"{\"path\":\"" + g_projects[i] + L"\",\"name\":\"" + name + L"\"}";
+                if (i + 1 < g_projects.size()) json += L",";
+            }
+            json += L"]";
+            std::wstring wmsg = L"EVENT:PROJECTS_LIST|" + json;
+            webview->PostWebMessageAsString(wmsg.c_str());
+        }
+        return;
+    }
+    if (msg.find(L"SET_CURRENT_PROJECT") == 0) {
+        std::wstring path = msg.substr(19);
+        g_currentProject = path;
+        SaveConfig();
+        return;
+    }
+    if (msg.find(L"SET_WINDOW") == 0) {
+        std::wstring rest = msg.substr(9);
+        size_t sep1 = rest.find(L'|');
+        int mode = 1;
+        int w = 0, h = 0;
+        if (sep1 != std::wstring::npos) {
+            mode = std::stoi(rest.substr(0, sep1));
+            std::wstring sizePart = rest.substr(sep1 + 1);
+            size_t sep2 = sizePart.find(L'|');
+            if (sep2 != std::wstring::npos) {
+                w = std::stoi(sizePart.substr(0, sep2));
+                h = std::stoi(sizePart.substr(sep2 + 1));
+            }
+        } else {
+            mode = std::stoi(rest);
+        }
+        setWindowMode(mode, w, h);
+        return;
+    }
+    if (msg == L"AGENT_LIST") {
+        listAgents(webview);
+        return;
+    }
+    if (msg.find(L"AGENT_UNINSTALL") == 0) {
+        std::wstring name = msg.substr(16);
+        uninstallAgent(name, webview);
+        return;
+    }
+    if (msg == L"OPEN_SETTINGS") {
+        openSettingsWindow();
+        return;
+    }
+    if (msg == L"OPEN_AGENT_MANAGER") {
+        openAgentManagerWindow();
+        return;
+    }
+}
+
+static LRESULT CALLBACK WindowProcMain(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
-            g_hwnd = hwnd;
+            g_hwndMain = hwnd;
             g_hInstance = ((LPCREATESTRUCTW)lParam)->hInstance;
 
             InitCommonControls();
@@ -287,12 +787,26 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
 
             BuildObfuscateMap();
             if (!LoadConfig()) {
-                g_panelLeft = 280;
-                g_panelRight = 350;
-                g_panelCenter = 600;
-                g_panelCenterTop = 400;
-                g_panelCenterBottom = 160;
-                g_yamaVisible = true;
+                g_panelLeft = 280; g_panelRight = 350;
+                g_panelCenter = 600; g_panelCenterTop = 400;
+                g_panelCenterBottom = 160; g_yamaVisible = true;
+                g_windowMode = 1; g_customWidth = 1200; g_customHeight = 800;
+            }
+            LoadProjects();
+
+            if (g_windowMode == 2) {
+                ShowWindow(hwnd, SW_MAXIMIZE);
+                SetWindowLongW(hwnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN),
+                             GetSystemMetrics(SM_CYSCREEN), SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            } else if (g_windowMode == 3) {
+                ShowWindow(hwnd, SW_RESTORE);
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, g_customWidth, g_customHeight,
+                             SWP_NOMOVE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            } else if (g_windowMode == 0) {
+                ShowWindow(hwnd, SW_RESTORE);
+            } else {
+                ShowWindow(hwnd, SW_MAXIMIZE);
             }
 
             EnvironmentHandler* envHandler = new EnvironmentHandler(hwnd);
@@ -304,22 +818,24 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             return 0;
         }
         case WM_APP + 1: {
-            ControllerHandler* ctrlHandler = new ControllerHandler(hwnd);
+            ControllerHandlerMain* ctrlHandler = new ControllerHandlerMain(hwnd);
             g_webviewEnv->CreateCoreWebView2Controller(hwnd, ctrlHandler);
             return 0;
         }
         case WM_APP + 2: {
-            g_msgHandler = new WebMessageHandler(hwnd);
+            WebMessageHandler* msgHandler = new WebMessageHandler(hwnd, g_mainWebview);
+            EventRegistrationToken token;
+            g_mainWebview->add_WebMessageReceived(msgHandler, &token);
             return 0;
         }
         case WM_APP + 3: {
             return 0;
         }
         case WM_SIZE: {
-            if (g_webviewController) {
+            if (g_mainController) {
                 RECT rc;
                 GetClientRect(hwnd, &rc);
-                g_webviewController->put_Bounds(rc);
+                g_mainController->put_Bounds(rc);
             }
             return 0;
         }
@@ -349,18 +865,19 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
             break;
         case WM_DESTROY:
             SaveConfig();
-            if (g_webviewController) {
-                g_webviewController->put_IsVisible(FALSE);
-                g_webviewController->Release();
-                g_webviewController = nullptr;
+            SaveProjects();
+            if (g_mainController) {
+                g_mainController->put_IsVisible(FALSE);
+                g_mainController->Release();
+                g_mainController = nullptr;
+            }
+            if (g_mainWebview) {
+                g_mainWebview->Release();
+                g_mainWebview = nullptr;
             }
             if (g_webviewEnv) {
                 g_webviewEnv->Release();
                 g_webviewEnv = nullptr;
-            }
-            if (g_msgHandler) {
-                g_msgHandler->Release();
-                g_msgHandler = nullptr;
             }
             CoUninitialize();
             PostQuitMessage(0);
@@ -371,11 +888,84 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM l
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
 }
 
+static LRESULT CALLBACK WindowProcSecondary(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_CREATE: {
+            g_hInstance = ((LPCREATESTRUCTW)lParam)->hInstance;
+            InitCommonControls();
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            BuildObfuscateMap();
+
+            EnvironmentHandler* envHandler = new EnvironmentHandler(hwnd);
+            HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
+                nullptr, nullptr, nullptr, envHandler);
+            if (FAILED(hr)) {
+                OutputDebugStringW(L"Failed to create WebView2 environment (secondary)\n");
+            }
+            return 0;
+        }
+        case WM_APP + 1: {
+            auto it = g_secondaryUrls.find(hwnd);
+            std::wstring url;
+            if (it != g_secondaryUrls.end()) {
+                url = it->second;
+                g_secondaryUrls.erase(it);
+            }
+            ControllerHandlerSecondary* ctrlHandler = new ControllerHandlerSecondary(hwnd, url);
+            g_webviewEnv->CreateCoreWebView2Controller(hwnd, ctrlHandler);
+            return 0;
+        }
+        case WM_SIZE:
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        default:
+            return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+    }
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+static void createSecondaryWindow(const wchar_t* className, const wchar_t* title,
+                                   const std::wstring& url, int w, int h) {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = WindowProcSecondary;
+    wc.hInstance = g_hInstance;
+    wc.lpszClassName = className;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = CreateSolidBrush(RGB(20, 20, 20));
+    RegisterClassW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        0, className, title,
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, w, h,
+        nullptr, nullptr, g_hInstance, nullptr
+    );
+    if (hwnd) {
+        g_secondaryUrls[hwnd] = url;
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+    }
+}
+
+static void openSettingsWindow() {
+    createSecondaryWindow(L"NebulaSettingsClass", L"Nebula Settings",
+                          L"file:///" + GetExeDir() + L"\\ui\\settings.html",
+                          500, 450);
+}
+
+static void openAgentManagerWindow() {
+    createSecondaryWindow(L"NebulaAgentManagerClass", L"Nebula Agent Manager",
+                          L"file:///" + GetExeDir() + L"\\ui\\agentmanager.html",
+                          700, 500);
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     const wchar_t CLASS_NAME[] = L"NebulaDeskopCODE";
 
     WNDCLASSW wc = {};
-    wc.lpfnWndProc = WindowProc;
+    wc.lpfnWndProc = WindowProcMain;
     wc.hInstance = hInstance;
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -389,10 +979,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         L"NebulaDeskopCODE",
         WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800,
-        nullptr,
-        nullptr,
-        hInstance,
-        nullptr
+        nullptr, nullptr, hInstance, nullptr
     );
 
     if (hwnd == nullptr) {

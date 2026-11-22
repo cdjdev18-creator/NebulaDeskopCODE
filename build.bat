@@ -18,7 +18,7 @@ copy "ui\script.js" "EXE\ui\script.js" >nul
 if exist "confis\confiUI.txt" copy "confis\confiUI.txt" "EXE\confis\confiUI.txt" >nul
 
 :: Compile with WebView2 support (MinGW-w64)
-g++ -DUNICODE -D_UNICODE -Iinclude src\main.cpp -o EXE\NebulaDeskopCODE.exe -mwindows -luser32 -lgdi32 -lcomctl32 -lshlwapi -lole32 -loleaut32 -lWebView2Loader -Llib -lstdc++
+g++ -DUNICODE -D_UNICODE -Iinclude src\main.cpp -o EXE\NebulaDeskopCODE.exe -mwindows -luser32 -lgdi32 -lcomctl32 -lshlwapi -lole32 -loleaut32 -lWebView2Loader -lcrypt32 -lshell32 -Llib -lstdc++
 
 if errorlevel 1 (
     echo Error de compilacion.

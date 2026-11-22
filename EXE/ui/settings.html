@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nebula Settings</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  height: 100vh;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  padding: 20px;
+}
+h1 { font-size: 18px; margin-bottom: 20px; color: #e0e0e0; }
+.section {
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.section h2 {
+  font-size: 15px;
+  margin-bottom: 12px;
+  color: #ffffff;
+  border-bottom: 1px solid #3d3d3d;
+  padding-bottom: 6px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+label { font-size: 13px; color: #cccccc; min-width: 140px; }
+input[type="radio"] { cursor: pointer; }
+input[type="text"] {
+  background: #3d3d3d;
+  border: 1px solid #4d4d4d;
+  color: #e0e0e0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  width: 100px;
+}
+input[type="text"]:focus { border-color: #007acc; }
+select {
+  background: #3d3d3d;
+  border: 1px solid #4d4d4d;
+  color: #e0e0e0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+button {
+  background: #007acc;
+  color: #ffffff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+button:hover { background: #0066b3; }
+button.secondary { background: #3d3d3d; border: 1px solid #4d4d4d; }
+button.secondary:hover { background: #4d4d4d; }
+.hint { font-size: 11px; color: #888888; margin-top: 4px; }
+.mode-hint { margin-top: 8px; font-size: 12px; color: #aaaaaa; }
+</style>
+</head>
+<body>
+<h1>Nebula Settings</h1>
+
+<div class="section">
+  <h2>Apariencia y ventana</h2>
+
+  <div class="row">
+    <input type="radio" id="mode-normal" name="windowMode" value="0">
+    <label for="mode-normal">Ventana normal</label>
+  </div>
+  <div class="row">
+    <input type="radio" id="mode-maximized" name="windowMode" value="1">
+    <label for="mode-maximized">Ventana maximizada</label>
+  </div>
+  <div class="row">
+    <input type="radio" id="mode-fullscreen" name="windowMode" value="2">
+    <label for="mode-fullscreen">Pantalla completa</label>
+  </div>
+  <div class="row">
+    <input type="radio" id="mode-custom" name="windowMode" value="3">
+    <label for="mode-custom">Tamaño personalizado</label>
+  </div>
+
+  <div class="row" id="custom-size-row" style="display:none;">
+    <label>Ancho:</label>
+    <input type="text" id="custom-width" placeholder="1200">
+    <label>Alto:</label>
+    <input type="text" id="custom-height" placeholder="800">
+  </div>
+
+  <div class="mode-hint">
+    <strong>Modo normal:</strong> permite cambiar libremente el tama\u00f1o.<br>
+    <strong>Maximizada:</strong> ocupa el espacio disponible sin ocultar la barra de tareas.<br>
+    <strong>Pantalla completa:</strong> ocupa toda la pantalla sin bordes ni barra de t\u00edtulo.<br>
+    <strong>Tama\u00f1o personalizado:</strong> ancho y alto definidos por el usuario.
+  </div>
+</div>
+
+<div class="row" style="margin-top: 20px;">
+  <button id="btnSave">Guardar configuraci\u00f3n</button>
+  <button id="btnCancel" class="secondary">Cancelar</button>
+</div>
+
+<div class="hint" style="margin-top: 16px;">La configuraci\u00f3n se recuerda autom\u00e1ticamente al iniciar NebulaDeskopCODE.</div>
+
+<script>
+const modeRadios = document.querySelectorAll('input[name="windowMode"]');
+const customRow = document.getElementById('custom-size-row');
+const customWidth = document.getElementById('custom-width');
+const customHeight = document.getElementById('custom-height');
+
+modeRadios.forEach(r => {
+  r.addEventListener('change', () => {
+    customRow.style.display = r.value === '3' && r.checked ? 'block' : 'none';
+  });
+});
+
+function postMessage(msg) {
+  if (window.chrome && window.chrome.webview) {
+    window.chrome.webview.postMessage(msg);
+  } else if (window.webview) {
+    window.webview.postMessage(msg);
+  }
+}
+
+document.getElementById('btnSave').addEventListener('click', () => {
+  const mode = document.querySelector('input[name="windowMode"]:checked').value;
+  let w = 0, h = 0;
+  if (mode === '3') {
+    w = parseInt(customWidth.value) || 1200;
+    h = parseInt(customHeight.value) || 800;
+  }
+  postMessage('SET_WINDOW|' + mode + '|' + w + '|' + h);
+  postMessage('SAVE_CONFIG ' + JSON.stringify({
+    windowMode: parseInt(mode),
+    customW: w,
+    customH: h
+  }));
+  window.close();
+});
+
+document.getElementById('btnCancel').addEventListener('click', () => {
+  window.close();
+});
+</script>
+</body>
+</html>

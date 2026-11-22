@@ -12,50 +12,14 @@
     <div class="panel yama-panel" id="yama-panel">
       <div class="panel-header">Yama</div>
       <div class="panel-content">
-        <div class="tree" id="yama-tree">
-          <div class="tree-item expanded" data-path="src">
-            <span class="tree-toggle">▼</span><span class="tree-label">src</span>
-            <div class="tree-children">
-              <div class="tree-item file" data-path="src/main.cpp">
-                <span class="tree-file">📄 main.cpp</span>
-              </div>
-            </div>
-          </div>
-          <div class="tree-item expanded" data-path="EXE">
-            <span class="tree-toggle">▼</span><span class="tree-label">EXE</span>
-            <div class="tree-children"></div>
-          </div>
-          <div class="tree-item" data-path=".kilo">
-            <span class="tree-toggle">▶</span><span class="tree-label">.kilo</span>
-            <div class="tree-children"></div>
-          </div>
-          <div class="tree-item file" data-path="build.bat">
-            <span class="tree-file">📄 build.bat</span>
-          </div>
-          <div class="tree-item file" data-path="LICENSE">
-            <span class="tree-file">📄 LICENSE</span>
-          </div>
-        </div>
+        <div class="tree" id="yama-tree"></div>
       </div>
       <div class="panel-resizer" id="yama-projects-resizer"></div>
     </div>
     <div class="panel projects-panel" id="projects-panel">
       <div class="panel-header">Proyectos Nebula</div>
       <div class="panel-content">
-        <div class="tree" id="projects-tree">
-          <div class="tree-item expanded" data-path="Mi Proyecto">
-            <span class="tree-toggle">▼</span><span class="tree-label">Mi Proyecto</span>
-            <div class="tree-children"></div>
-          </div>
-          <div class="tree-item expanded" data-path="Web App">
-            <span class="tree-toggle">▼</span><span class="tree-label">Web App</span>
-            <div class="tree-children"></div>
-          </div>
-          <div class="tree-item" data-path="Consola">
-            <span class="tree-toggle">▶</span><span class="tree-label">Consola</span>
-            <div class="tree-children"></div>
-          </div>
-        </div>
+        <div class="tree" id="projects-tree"></div>
       </div>
       <div class="panel-buttons">
         <button class="btn btn-config">⚙ Configuración</button>
@@ -71,7 +35,7 @@
     <div class="panel editor-panel" id="editor-panel">
       <div class="panel-header">Editor</div>
       <div class="panel-content" id="editor-content">
-        <div class="editor-placeholder">Selecciona un archivo desde Yama para editarlo aqu\u00ed.</div>
+        <div class="editor-placeholder">Selecciona un proyecto y archivo desde Yama para editar.</div>
       </div>
       <div class="panel-resizer" id="editor-terminal-resizer"></div>
     </div>
@@ -93,7 +57,7 @@
     <div class="panel ai-panel" id="ai-panel">
       <div class="panel-header">Nebula AI</div>
       <div class="panel-content" id="ai-conversation">
-        <div class="ai-message system">Nebula Agent inicializado. Conversaciones aparecer\u00e1n aqu\u00ed.</div>
+        <div class="ai-message system">Nebula Agent inicializado. Conversaciones aparecerán aquí.</div>
       </div>
       <div class="ai-input-area">
         <input type="text" id="ai-input" placeholder="Escribe un mensaje...">
