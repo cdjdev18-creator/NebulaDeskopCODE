@@ -7,6 +7,9 @@
 #define ID_AGENT_CONV     1003
 #define ID_AGENT_INPUT    1004
 #define ID_SEND_BTN       1005
+#define ID_BTN_CONFIG     1010
+#define ID_BTN_AGENTES    1011
+#define ID_BTN_ADD_PROJ   1012
 
 #define ID_SPLITTER_LR    2001
 #define ID_SPLITTER_LTB   2002
@@ -36,6 +39,9 @@ static HWND g_hProjTree   = nullptr;
 static HWND g_hAgentConv  = nullptr;
 static HWND g_hAgentInput = nullptr;
 static HWND g_hSendBtn    = nullptr;
+static HWND g_hBtnConfig  = nullptr;
+static HWND g_hBtnAgentes = nullptr;
+static HWND g_hBtnAddProj = nullptr;
 static HWND g_hSplitLR    = nullptr;
 static HWND g_hSplitLTB   = nullptr;
 static HWND g_hSplitCT    = nullptr;
@@ -160,7 +166,18 @@ static void LayoutControls(HWND hwnd) {
 
     MoveWindow(g_hFileTree,   xLeft + 4, 4, leftW - 8, ySplitL - 8, TRUE);
     MoveWindow(g_hSplitLTB,   xLeft, ySplitL, leftW, SPLIT, TRUE);
-    MoveWindow(g_hProjTree,   xLeft + 4, yBottomL + 4, leftW - 8, availH - yBottomL - 8, TRUE);
+
+    int btnH = 26;
+    int btnGap = 6;
+    int btnAreaH = btnH * 3 + btnGap * 2;
+    int treeH = availH - yBottomL - btnAreaH - 10;
+    if (treeH < 60) treeH = 60;
+    MoveWindow(g_hProjTree,   xLeft + 4, yBottomL + 4, leftW - 8, treeH, TRUE);
+
+    int btnY = yBottomL + 4 + treeH + btnGap;
+    MoveWindow(g_hBtnConfig,  xLeft + 8, btnY, leftW - 16, btnH, TRUE);
+    MoveWindow(g_hBtnAgentes, xLeft + 8, btnY + btnH + btnGap, leftW - 16, btnH, TRUE);
+    MoveWindow(g_hBtnAddProj, xLeft + 8, btnY + (btnH + btnGap) * 2, leftW - 16, btnH, TRUE);
 
     MoveWindow(g_hSplitLR,    xSplit1, 0, SPLIT, availH, TRUE);
 
@@ -253,6 +270,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                                        0, 0, 72, 28, hwnd, (HMENU)ID_SEND_BTN, nullptr, nullptr);
             SendMessageW(g_hSendBtn, WM_SETFONT, (WPARAM)g_hFont, 0);
 
+            g_hBtnConfig = CreateWindowW(WC_BUTTON, L"Configuracion",
+                                         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                         0, 0, 100, 26, hwnd, (HMENU)ID_BTN_CONFIG, nullptr, nullptr);
+            SendMessageW(g_hBtnConfig, WM_SETFONT, (WPARAM)g_hFont, 0);
+
+            g_hBtnAgentes = CreateWindowW(WC_BUTTON, L"Agentes",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          0, 0, 100, 26, hwnd, (HMENU)ID_BTN_AGENTES, nullptr, nullptr);
+            SendMessageW(g_hBtnAgentes, WM_SETFONT, (WPARAM)g_hFont, 0);
+
+            g_hBtnAddProj = CreateWindowW(WC_BUTTON, L"Agregar proyecto +",
+                                          WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                          0, 0, 100, 26, hwnd, (HMENU)ID_BTN_ADD_PROJ, nullptr, nullptr);
+            SendMessageW(g_hBtnAddProj, WM_SETFONT, (WPARAM)g_hFont, 0);
+
             LayoutControls(hwnd);
             return 0;
         }
@@ -306,6 +338,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case WM_CTLCOLORSTATIC: {
             HDC hdc = (HDC)wParam;
             HWND hCtrl = (HWND)lParam;
+            SetBkColor(hdc, CLR_PANEL);
+            SetTextColor(hdc, CLR_TEXT);
+            return (LRESULT)CreateSolidBrush(CLR_PANEL);
+        }
+        case WM_CTLCOLORBTN: {
+            HDC hdc = (HDC)wParam;
             SetBkColor(hdc, CLR_PANEL);
             SetTextColor(hdc, CLR_TEXT);
             return (LRESULT)CreateSolidBrush(CLR_PANEL);
@@ -406,6 +444,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     SetWindowTextW(g_hAgentInput, L"");
                     SendMessageW(g_hAgentConv, EM_LINESCROLL, 0, 0x7FFF);
                 }
+                return 0;
+            }
+            if (LOWORD(wParam) == ID_BTN_CONFIG ||
+                LOWORD(wParam) == ID_BTN_AGENTES ||
+                LOWORD(wParam) == ID_BTN_ADD_PROJ) {
                 return 0;
             }
             break;
