@@ -1,0 +1,9 @@
+LIBRARY WebView2Loader.dll
+EXPORTS
+    CreateCoreWebView2Environment
+    CreateCoreWebView2EnvironmentWithOptions
+    CreateOrJoinCoreWebView2ClusterEnvironment
+    GetAvailableCoreWebView2BrowserVersionString
+    GetAvailableCoreWebView2BrowserVersionStringWithOptions
+    DllCanUnloadNow
+    DllGetClassObject
